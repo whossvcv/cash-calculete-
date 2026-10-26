@@ -36,6 +36,13 @@ CREATE TABLE IF NOT EXISTS entries(
 CREATE INDEX IF NOT EXISTS ix_entries ON entries(user_id, ts);
 """)
 
+for _col in ("joined", "last_seen"):
+    try:
+        db.execute(f"ALTER TABLE users ADD COLUMN {_col} INTEGER DEFAULT 0")
+        db.commit()
+    except sqlite3.OperationalError:
+        pass
+
 router = Router()
 
 MENU = ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
@@ -56,7 +63,9 @@ WELCOME = (
 
 # ---------- helpers ----------
 def user(uid):
-    db.execute("INSERT OR IGNORE INTO users(id) VALUES(?)", (uid,))
+    now = int(datetime.now().timestamp())
+    db.execute("INSERT OR IGNORE INTO users(id, joined) VALUES(?, ?)", (uid, now))
+    db.execute("UPDATE users SET last_seen=? WHERE id=?", (now, uid))
     db.commit()
     return db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
 
@@ -271,6 +280,28 @@ async def export(m: Message):
         w.writerow([datetime.fromtimestamp(r["ts"], zone(u)).strftime("%Y-%m-%d %H:%M"),
                     r["kind"], r["amount"], r["category"], r["note"]])
     await m.answer_document(BufferedInputFile(buf.getvalue().encode("utf-8-sig"), filename="moneta.csv"))
+
+
+@router.message(Command("admin"))
+async def admin(m: Message):
+    # Статистика только для владельца: задайте ADMIN_ID (ваш Telegram ID) в переменных окружения.
+    if str(m.from_user.id) != os.getenv("ADMIN_ID", ""):
+        return
+    now = int(datetime.now().timestamp())
+
+    def count(sql, *args):
+        return db.execute(sql, args).fetchone()[0]
+
+    total = count("SELECT COUNT(*) FROM users")
+    await m.answer(
+        "📈 <b>Статистика бота</b>\n"
+        f"👥 Всего пользователей: {total}\n"
+        f"🆕 Новых за 24 часа: {count('SELECT COUNT(*) FROM users WHERE joined>=?', now - 86400)}\n"
+        f"🆕 Новых за 7 дней: {count('SELECT COUNT(*) FROM users WHERE joined>=?', now - 7 * 86400)}\n"
+        f"🆕 Новых за 30 дней: {count('SELECT COUNT(*) FROM users WHERE joined>=?', now - 30 * 86400)}\n"
+        f"🔥 Активных за 24 часа: {count('SELECT COUNT(*) FROM users WHERE last_seen>=?', now - 86400)}\n"
+        f"🔥 Активных за 7 дней: {count('SELECT COUNT(*) FROM users WHERE last_seen>=?', now - 7 * 86400)}\n"
+        f"🧾 Всего записей о тратах: {count('SELECT COUNT(*) FROM entries')}")
 
 
 # ---------- entry callbacks ----------
